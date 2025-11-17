@@ -5,65 +5,79 @@
 
 
 # useful for handling different item types with a single interface
-from itemadapter import ItemAdapter
-import json, sqlite3
+# pipelines.py  (replace or add this pipeline)
+import sys
 from pathlib import Path
+from itemadapter import ItemAdapter
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.exc import SQLAlchemyError
+import json
+import logging
 
-class JavPipeline:
-    def process_item(self, item, spider):
-        return item
+log = logging.getLogger(__name__)
 
-DB_PATH = Path("jav_metadata.db")
+# ---- Make the mediahub backend importable from inside scrapy ----
+# Adjust how many parents to go up depending on where your scrapy project sits.
+# This will add the repo root so `backend.db.models` can be imported.
+HERE = Path(__file__).resolve()
+# example layout from your tree: <repo-root>/app/scrapers/jav/... and <repo-root>/backend/db/models.py
+# So we go up 4 parents to reach repo root; adjust if needed.
+REPO_ROOT = HERE.parents[4]     # <-- change this number if your layout differs
+sys.path.insert(0, str(REPO_ROOT / "backend"))  # add backend on path
 
-class SQLitePipeline:
+# Now import your SQLAlchemy models/engine
+try:
+    from db.models import JavMetadata, engine, Base   # your models file creates engine & tables
+except Exception as e:
+    log.exception("Failed to import db.models — check sys.path and REPO_ROOT. %s", e)
+    raise
+
+# Prepare a Session factory
+Session = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+
+class SQLAlchemyPipeline:
     def open_spider(self, spider):
-        DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-        # single connection for the pipeline lifetime
-        # timeout=30 allows the connection to wait if briefly locked
-        self.conn = sqlite3.connect(str(DB_PATH), timeout=30, check_same_thread=False)
-        self.cur = self.conn.cursor()
-        # create table if missing
-        self.cur.execute("""
-        CREATE TABLE IF NOT EXISTS jav (
-            code TEXT PRIMARY KEY,
-            metadata_json TEXT,
-            url TEXT,
-            status TEXT,
-            note TEXT,
-            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        )
-        """)
-        self.conn.commit()
-
-        # prepare an upsert SQL (faster than formatting each time)
-        self._upsert_sql = """
-        INSERT INTO jav(code, metadata_json, url, status, note)
-        VALUES (?, ?, ?, ?, ?)
-        ON CONFLICT(code) DO UPDATE SET
-            metadata_json=excluded.metadata_json,
-            url=excluded.url,
-            status=excluded.status,
-            note=excluded.note,
-            updated_at=CURRENT_TIMESTAMP
-        """
+        # optional: ensure tables exist (models.py already runs create_all on import).
+        # Base.metadata.create_all(bind=engine)
+        self.session = Session()
 
     def process_item(self, item, spider):
-        metadata = dict(item)
-        code = metadata.get("code") or metadata.get("jav_code")
-        url = metadata.get("movie_url", "")
-        status = metadata.get("status", "ok")  # default to 'ok' if not present
-        note = metadata.get("note", "")  # default to 'ok' if not present
-
+        adapter = ItemAdapter(item)
+        # get code (consistent with your spider)
+        code = adapter.get("code") or adapter.get("jav_code") or adapter.get("id")
         if not code:
-            spider.logger.warning("Skipping item without code: %r", metadata)
+            spider.logger.warning("Item without code — skipping: %r", dict(item))
             return item
 
-        metadata_json = json.dumps(metadata, ensure_ascii=False)
-        self.cur.execute(self._upsert_sql, (code, metadata_json, url, status, note))
-        # commit every N items might be faster; commit per item is safest
-        self.conn.commit()
+        # prepare a JavMetadata instance (use fields you have in models)
+        # store full metadata in metadata_json (or metadata_json field name you use)
+        metadata_obj = dict(item)
+        # guard: ensure JSON-serializable if your model expects JSON; keep it simple and dump to string if needed
+        try:
+            # If JavMetadata.metadata_json is JSON type in SQLAlchemy, we can pass dict directly.
+            jm = JavMetadata(
+                code=code,
+                metadata_json=metadata_obj,
+                source_url=metadata_obj.get("movie_url") or metadata_obj.get("url"),
+            )
+            # upsert: merge will INSERT or UPDATE based on PK
+            self.session.merge(jm)
+            self.session.commit()
+        except SQLAlchemyError as e:
+            spider.logger.exception("DB error writing code %s: %s", code, e)
+            try:
+                self.session.rollback()
+            except Exception:
+                pass
+        except Exception as e:
+            spider.logger.exception("Unexpected error in pipeline for code %s: %s", code, e)
+
         return item
 
     def close_spider(self, spider):
-        self.conn.commit()
-        self.conn.close()
+        try:
+            self.session.commit()
+        except Exception:
+            pass
+        finally:
+            self.session.close()
