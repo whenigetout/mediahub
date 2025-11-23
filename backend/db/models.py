@@ -73,10 +73,10 @@ class JavMetadata(Base):
     source_url = Column(String, nullable=True)
     fetched_at = Column(DateTime, default=now, onupdate=now)
 
-    # Status column: stored as text in DB (native_enum=False is portable, esp. for SQLite)
+    # Status column: stored as text in DB 
     status = Column(
-        SQLEnum(FetchStatus, native_enum=False, length=50),
-        default=FetchStatus.FETCHED,
+        String(length=50),
+        default=FetchStatus.FETCHED.value,
         nullable=False,
         server_default=FetchStatus.FETCHED.value
     )

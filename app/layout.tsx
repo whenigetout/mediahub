@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
-import SideNav from "./ui/sidenav";
+import SideNav from "./ui/sidenav/sidenav";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -28,9 +28,7 @@ export default function RootLayout({
       <body
         className={`${geistSans.variable} ${geistMono.variable} antialiased`}
       >
-        <div className="w-full flex-none md:w-64">
-          <SideNav />
-        </div>
+        <SideNav />
         <div className="grow p-6 md:overflow-y-auto md:p-12">{children}</div>
       </body>
     </html>

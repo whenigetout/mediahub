@@ -6,7 +6,7 @@ class JAVSpider(scrapy.Spider):
     with open("jav/jav_codes.json", "r", encoding="utf-8") as f:
         data = json.load(f)
 
-    jav_codes = [obj["jav_code"] for obj in data][:3]
+    jav_codes = [obj["jav_code"] for obj in data]
 
     def start_requests(self):
         for code in self.jav_codes:

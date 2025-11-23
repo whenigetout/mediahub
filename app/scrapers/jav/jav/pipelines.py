@@ -27,7 +27,7 @@ sys.path.insert(0, str(REPO_ROOT / "backend"))  # add backend on path
 
 # Now import your SQLAlchemy models/engine
 try:
-    from db.models import JavMetadata, engine, Base   # your models file creates engine & tables
+    from db.models import JavMetadata, engine, Base, FetchStatus   # your models file creates engine & tables
 except Exception as e:
     log.exception("Failed to import db.models — check sys.path and REPO_ROOT. %s", e)
     raise
@@ -40,6 +40,36 @@ class SQLAlchemyPipeline:
         # optional: ensure tables exist (models.py already runs create_all on import).
         # Base.metadata.create_all(bind=engine)
         self.session = Session()
+
+    def _normalize_status(self, status_value):
+        """Return a FetchStatus member given a string or enum; fallback to FETCHED."""
+        if status_value is None:
+            return FetchStatus.FETCHED
+
+        # Accept already-correct enum member
+        if isinstance(status_value, FetchStatus):
+            return status_value
+
+        # Normalize to simple lowercase string
+        sval = str(status_value).strip()
+        if not sval:
+            return FetchStatus.FETCHED
+
+        # Try direct constructor (matches by value)
+        try:
+            return FetchStatus(sval)
+        except Exception:
+            pass
+
+        # Try case-insensitive match against either value or name
+        low = sval.lower()
+        for member in FetchStatus:
+            if member.value.lower() == low or member.name.lower() == low:
+                return member
+
+        # fallback
+        return FetchStatus.FETCHED
+
 
     def process_item(self, item, spider):
         adapter = ItemAdapter(item)
@@ -54,11 +84,16 @@ class SQLAlchemyPipeline:
         metadata_obj = dict(item)
         # guard: ensure JSON-serializable if your model expects JSON; keep it simple and dump to string if needed
         try:
+            # decide status: item can include status; otherwise default to FETCHED
+            status_in = metadata_obj.get("status")
+            status_enum = self._normalize_status(status_in)
+            status_to_store_in_db = status_enum.value
             # If JavMetadata.metadata_json is JSON type in SQLAlchemy, we can pass dict directly.
             jm = JavMetadata(
                 code=code,
                 metadata_json=metadata_obj,
                 source_url=metadata_obj.get("movie_url") or metadata_obj.get("url"),
+                status=status_to_store_in_db
             )
             # upsert: merge will INSERT or UPDATE based on PK
             self.session.merge(jm)

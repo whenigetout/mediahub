@@ -7,6 +7,8 @@ from pathlib import Path
 import datetime
 from contextlib import asynccontextmanager
 import threading
+from pydantic import BaseModel
+from typing import List, Optional
 
 SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
 
@@ -291,3 +293,83 @@ def clear_library():
     db.commit()
     db.close()
     return {"status": "cleared", "deleted_rows": deleted}
+
+class ListDirReq(BaseModel):
+    path: str
+    include_files: Optional[bool] = False   # default: only directories
+    max_entries: Optional[int] = 1000      # safety limit
+    show_hidden: Optional[bool] = False    # include dotfiles if true
+
+class DirEntry(BaseModel):
+    name: str
+    path: str
+    is_dir: bool
+    filesize: Optional[int] = None
+    mtime: Optional[int] = None
+
+class ListDirResp(BaseModel):
+    ok: bool = True
+    entries: List[DirEntry]
+
+@app.post("/library/list_dir", response_model=ListDirResp)
+def list_dir(req: ListDirReq):
+    p = Path(req.path)
+
+    # Resolve and validate path exists
+    try:
+        p_resolved = p.resolve(strict=True)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Path not found")
+    except PermissionError:
+        raise HTTPException(status_code=403, detail="Permission denied")
+
+    if not p_resolved.is_dir():
+        raise HTTPException(status_code=400, detail="Path is not a directory")
+
+    entries = []
+    try:
+        # iterate children sorted by name
+        for child in sorted(p_resolved.iterdir(), key=lambda x: x.name.lower()):
+            # skip hidden entries unless requested
+            if not req.show_hidden and child.name.startswith("."):
+                continue
+
+            is_dir = False
+            try:
+                is_dir = child.is_dir()
+            except (OSError, PermissionError):
+                # If we can't stat it, skip or include minimal info
+                # we'll include a placeholder entry with is_dir=False (safe default)
+                is_dir = False
+
+            # if we only want directories, skip files here
+            if not req.include_files and not is_dir:
+                continue
+
+            filesize = None
+            mtime = None
+            if child.is_file():
+                try:
+                    st = child.stat()
+                    filesize = int(st.st_size)
+                    mtime = int(st.st_mtime)
+                except (OSError, PermissionError):
+                    filesize = None
+                    mtime = None
+
+            entries.append({
+                "name": child.name,
+                "path": str(child.resolve()) if child.exists() else str(child),
+                "is_dir": is_dir,
+                "filesize": filesize,
+                "mtime": mtime,
+            })
+
+            # safety: stop if we reached max_entries
+            if req.max_entries and len(entries) >= req.max_entries:
+                break
+
+    except (PermissionError, OSError) as e:
+        raise HTTPException(status_code=500, detail=f"Could not list directory: {e}")
+
+    return {"ok": True, "entries": entries}
