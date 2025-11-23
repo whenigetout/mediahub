@@ -63,7 +63,7 @@ DOWNLOAD_DELAY = 1
 #}
 
 ITEM_PIPELINES = {
-    'app.scrapers.jav.jav.pipelines.SQLitePipeline': 300,
+    'jav.pipelines.SQLAlchemyPipeline': 300,
 }
 # allow concurrency but safe writing happens in pipeline per item
 CONCURRENT_REQUESTS = 16
